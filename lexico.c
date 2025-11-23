@@ -56,7 +56,7 @@ static Token getToken(void){
     skip_ws_and_newlines();
 
     // Fim de arquivo
-    if(*input=='\0'){ tok.type=END; tok.line=current_line; return tok; }
+    if(*input=='\0'){ tok.type=END_FILE; tok.line=current_line; return tok; }
 
     // Identificadores e Palavras Reservadas
     if(isalpha((unsigned char)*input)){
@@ -136,7 +136,7 @@ TokenVec tokenize_to_vector(const char *src){
     for(;;){
         Token t = getToken();
         tv_push(&v, t);
-        if(t.type == END) break;
+        if(t.type == END_FILE) break;
     }
     return v;
 }
@@ -174,7 +174,7 @@ const char *token_name(int t){
         case LE: return "<=";
         case GT: return ">";
         case GE: return ">=";
-        case END: return "FIM_DE_ARQUIVO";
+        case END_FILE: return "FIM_DE_ARQUIVO";
         default: return "TOKEN_DESCONHECIDO";
     }
 }
