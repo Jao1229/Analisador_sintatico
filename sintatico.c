@@ -3,181 +3,285 @@
 #include <ctype.h>
 #include <string.h>
 #include "lexico.h"
+#include "sintatico.h"
+#include "declaracoes.h" 
 
-static const char *input;
-static int current_line = 1;
+/* === Funções Auxiliares do Parser ===
+   Mantivemos estáticas aqui para uso interno.
+*/
 
-/* ---------- Vetor dinâmico (com liberação de lexemas) ---------- */
-static void tv_init(TokenVec *v) { v->data=NULL; v->size=v->cap=0; }
-static void tv_reserve(TokenVec *v, size_t n){
-    if(n <= v->cap) return;
-    size_t cap = v->cap ? v->cap : 16;
-    while(cap < n) cap *= 2;
-    Token *p = realloc(v->data, cap * sizeof(Token));
-    if(!p){ perror("realloc"); exit(1); }
-    v->data=p; v->cap=cap;
-}
-static void tv_push(TokenVec *v, Token t){
-    if(v->size+1 > v->cap) tv_reserve(v, v->size+1);
-    v->data[v->size++] = t;
-}
-// Função para liberar o vetor, incluindo todos os lexemas alocados
-void tv_free(TokenVec *v){ 
-    for(int i=0; i<v->size; i++) {
-        free(v->data[i].lexeme); 
-    }
-    free(v->data); v->data=NULL; v->size=v->cap=0; 
+static const Token *cur(const Parser *p) {
+    if (!p || !p->toks) return NULL;
+    if (p->i < 0) return NULL;
+    if (p->i >= p->n) return &p->toks[p->n-1];
+    return &p->toks[p->i];
 }
 
-
-/* ---------- Lexer (Com Line Counting e Palavras-Chave) ---------- */
-static void skip_ws_and_newlines(void){ 
-    while(*input==' '||*input=='\t' || *input=='\n'){
-        if (*input == '\n') current_line++; // CRUCIAL: Contagem de linha
-        input++; 
-    }
-}
-static int check_keyword(const char *s){
-    if (strcmp(s, "program") == 0) return PROGRAM_TOK;
-    if (strcmp(s, "var") == 0)     return VAR_TOK;
-    if (strcmp(s, "integer") == 0) return INTEGER_TOK;
-    if (strcmp(s, "real") == 0)    return REAL_TOK;
-    if (strcmp(s, "begin") == 0)   return BEGIN_TOK;
-    if (strcmp(s, "end") == 0)     return END_TOK;
-    if (strcmp(s, "if") == 0)      return IF_TOK;
-    if (strcmp(s, "then") == 0)    return THEN_TOK;
-    if (strcmp(s, "else") == 0)    return ELSE_TOK;
-    if (strcmp(s, "while") == 0)   return WHILE_TOK;
-    if (strcmp(s, "do") == 0)      return DO_TOK;
-    return ID; // Se não for palavra-chave, é ID
+static void advance(Parser *p) {
+    if (!p) return;
+    if (p->i < p->n - 1) p->i++;
 }
 
-static Token getToken(void){
-    Token tok = {0, 0.0, NULL, current_line}; // Inicializa linha
-
-    skip_ws_and_newlines();
-    tok.line = current_line; // Garante que a linha do token seja a atual após pular espaços
-
-    // Fim de arquivo
-    if(*input=='\0'){ tok.type=END_FILE; return tok; }
-
-    // Identificadores e Palavras Reservadas
-    if(isalpha((unsigned char)*input)){
-        const char *start = input;
-        while(isalnum((unsigned char)*input) || *input == '_') input++;
-        int len = input - start;
-        // strndup não é padrão C99, usaremos strdup ou malloc + memcpy
-        char *lex = strndup(start, len); 
-        tok.type = check_keyword(lex);
-        tok.lexeme = lex;
-        return tok;
+static void match(Parser *p, int expected) {
+    const Token *t = cur(p);
+    if (!t) {
+        fprintf(stderr, "0:fim de arquivo nao esperado.\n");
+        exit(EXIT_FAILURE);
     }
-    
-    // Números
-    if(isdigit((unsigned char)*input)){
-        char *endptr;
-        tok.value = strtod(input, &endptr);
-        int len = endptr - input;
-        tok.lexeme = strndup(input, len);
-        input = endptr;
-        tok.type=NUM; 
-        return tok;
-    }
-
-    // Símbolos de 2 ou mais caracteres (CORRIGIDO)
-    if (*input == ':') {
-        input++;
-        if (*input == '=') { tok.type = ASSIGN; input++; tok.lexeme = strdup(":="); } 
-        else { tok.type = COLON; tok.lexeme = strdup(":"); }
-    }
-    else if (*input == '<') {
-        input++;
-        if (*input == '=') { tok.type = LE; input++; tok.lexeme = strdup("<="); } 
-        else if (*input == '>') { tok.type = NE; input++; tok.lexeme = strdup("<>"); } 
-        else { tok.type = LT; tok.lexeme = strdup("<"); }
-    }
-    else if (*input == '>') {
-        input++;
-        if (*input == '=') { tok.type = GE; input++; tok.lexeme = strdup(">="); } 
-        else { tok.type = GT; tok.lexeme = strdup(">"); }
-    }
-    
-    // Símbolos de 1 caractere
-    else {
-        int char_type = 0;
-        switch(*input){
-            case '+': char_type = PLUS; break;
-            case '-': char_type = MINUS; break;
-            case '*': char_type = MULT; break;
-            case '/': char_type = DIV; break;
-            case '(': char_type = LPAREN; break;
-            case ')': char_type = RPAREN; break;
-            case ';': char_type = SEMICOLON; break;
-            case ',': char_type = COMMA; break;
-            case '=': char_type = EQ; break; 
-            case '.': char_type = DOT; break;
-            default:
-                fprintf(stderr,"Erro léxico na linha %d: caractere inesperado '%c'\n", current_line, *input);
-                exit(1);
+    if (t->type == expected) {
+        advance(p);
+        return;
+    } else {
+        /* Gestão de erros: mostra linha e o que veio errado */
+        if (t->type == END_FILE) {
+            fprintf(stderr, "%d:fim de arquivo nao esperado.\n", t->line);
+        } else {
+            const char *lex = t->lexeme ? t->lexeme : token_name(t->type);
+            fprintf(stderr, "%d:token nao esperado [%s].\n", t->line, lex);
         }
-        tok.type = char_type;
-        // Aloca o lexema para o caractere simples
-        tok.lexeme = (char*)malloc(2);
-        tok.lexeme[0] = *input;
-        tok.lexeme[1] = '\0';
-        input++;
+        exit(EXIT_FAILURE);
     }
-
-    return tok;
 }
 
-/* ---------- Tokenização completa ---------- */
-TokenVec tokenize_to_vector(const char *src){
-    input = src;
-    current_line = 1;
-    TokenVec v; tv_init(&v);
-    for(;;){
-        Token t = getToken();
-        tv_push(&v, t);
-        if(t.type == END_FILE) break;
-    }
-    return v;
+/* Sinônimo para match, só pra ficar legível que "esperamos" tal token */
+static void expect(Parser *p, int expected) {
+    match(p, expected);
 }
 
-/* ---------- Nome de token (para mensagens de erro) ---------- */
-const char *token_name(int t){
-    switch(t){
-        case NUM: return "NUMERO";
-        case ID: return "IDENTIFICADOR";
-        case PROGRAM_TOK: return "PROGRAM";
-        case VAR_TOK: return "VAR";
-        case INTEGER_TOK: return "INTEGER";
-        case REAL_TOK: return "REAL";
-        case BEGIN_TOK: return "BEGIN";
-        case END_TOK: return "END";
-        case IF_TOK: return "IF";
-        case THEN_TOK: return "THEN";
-        case ELSE_TOK: return "ELSE";
-        case WHILE_TOK: return "WHILE";
-        case DO_TOK: return "DO";
-        case PLUS: return "+";
-        case MINUS: return "-";
-        case MULT: return "*";
-        case DIV: return "/";
-        case LPAREN: return "(";
-        case RPAREN: return ")";
-        case DOT: return ".";
-        case SEMICOLON: return ";";
-        case COLON: return ":";
-        case COMMA: return ",";
-        case ASSIGN: return ":=";
-        case EQ: return "=";
-        case NE: return "<>";
-        case LT: return "<";
-        case LE: return "<=";
-        case GT: return ">";
-        case GE: return ">=";
-        case END_FILE: return "FIM_DE_ARQUIVO";
-        default: return "TOKEN_DESCONHECIDO";
+/* --- Declaração antecipada das funções --- */
+static void programa(Parser *p);
+static void bloco(Parser *p);
+static void comando_composto(Parser *p);
+static void comando(Parser *p);
+static void atribuicao(Parser *p);
+static void comando_condicional(Parser *p);
+static void comando_repetitivo(Parser *p);
+
+/* Funções de Expressões (Matemática e Lógica) */
+static void expressao(Parser *p);
+static void expressao_simples(Parser *p);
+static void termo(Parser *p);
+static void fator(Parser *p);
+static void relacao(Parser *p);
+static void variavel(Parser *p);
+
+/* === Implementação das Regras da Gramática === 
+*/
+
+/* Regra principal: programa começa com 'program', tem nome, e termina com ponto. */
+static void programa(Parser *p) {
+    printf("<programa> ::= program <identificador> ; <bloco> .\n");
+    expect(p, PROGRAM_TOK);
+    expect(p, ID);
+    expect(p, SEMICOLON);
+    bloco(p);
+    expect(p, DOT);
+}
+
+/* O bloco junta as declarações (var) e os comandos (código em si) */
+static void bloco(Parser *p) {
+    parte_de_declaracoes_de_variaveis(p); 
+    comando_composto(p);
+}
+
+/* O famoso bloco begin ... end */
+static void comando_composto(Parser *p) {
+    printf("<comando_composto> ::= begin <comando> ; { <comando> ; } end\n");
+    expect(p, BEGIN_TOK);
+
+    /* Tem que ter ao menos um comando */
+    comando(p);
+    expect(p, SEMICOLON);
+
+    /* Aqui a gente fica rodando enquanto houver novos comandos.
+       Como sabemos que é um comando? Se começar com ID, begin, if ou while.
+    */
+    while (cur(p)->type == ID || cur(p)->type == BEGIN_TOK || 
+           cur(p)->type == IF_TOK || cur(p)->type == WHILE_TOK) {
+        comando(p);
+        expect(p, SEMICOLON);
     }
+
+    expect(p, END_TOK);
+}
+
+/* Decide qual tipo de comando executar com base no token atual */
+static void comando(Parser *p) {
+    int t = cur(p)->type;
+
+    if (t == ID) {
+        atribuicao(p);        /* Ex: x := 10 */
+    } else if (t == BEGIN_TOK) {
+        comando_composto(p);  /* Ex: begin ... end */
+    } else if (t == IF_TOK) {
+        comando_condicional(p); /* Ex: if ... then */
+    } else if (t == WHILE_TOK) {
+        comando_repetitivo(p);  /* Ex: while ... do */
+    } else {
+        /* Se não for nenhum desses, temos um erro de sintaxe. */
+        const Token *err = cur(p);
+        const char *lex = err->lexeme ? err->lexeme : token_name(err->type);
+        fprintf(stderr, "%d:token nao esperado [%s].\n", err->line, lex);
+        exit(EXIT_FAILURE);
+    }
+}
+
+/* Atribuição: coloca valor numa variável. Ex: a := b + 1 */
+static void atribuicao(Parser *p) {
+    printf("<atribuicao> ::= <variavel> := <expressao>\n");
+    variavel(p);       /* O lado esquerdo (quem recebe) */
+    expect(p, ASSIGN); /* O símbolo := */
+    expressao(p);      /* O lado direito (o valor calculado) */
+}
+
+/* Estrutura IF ... THEN ... [ELSE] */
+static void comando_condicional(Parser *p) {
+    printf("<comando_condicional> ::= if <expressao> then <comando> [else <comando>]\n");
+    expect(p, IF_TOK);
+    expressao(p);      /* A condição */
+    expect(p, THEN_TOK);
+    comando(p);        /* O que fazer se for verdade */
+
+    /* O ELSE é opcional, só entramos aqui se o token atual for 'else' */
+    if (cur(p)->type == ELSE_TOK) {
+        expect(p, ELSE_TOK);
+        comando(p);
+    }
+}
+
+/* Estrutura WHILE ... DO */
+static void comando_repetitivo(Parser *p) {
+    printf("<comando_repetitivo> ::= while <expressao> do <comando>\n");
+    expect(p, WHILE_TOK);
+    expressao(p);      /* Condição de parada */
+    expect(p, DO_TOK);
+    comando(p);        /* O que repetir */
+}
+
+/* === Análise de Expressões ===
+   Aqui a precedência importa (quem é calculado primeiro).
+*/
+
+/* Expressão geral: pode ter comparação (ex: a < b) */
+static void expressao(Parser *p){
+    printf("<expressao> ::= <expressao_simples> [<relacao> <expressao_simples>]\n");
+    expressao_simples(p);
+
+    const Token *t = cur(p);
+    if (!t) return;
+
+    /* Se tiver operador relacional (=, <, >, etc), processa a segunda parte */
+    switch (t->type){
+        case EQ:
+        case NE:
+        case LT:
+        case LE:
+        case GT:
+        case GE:
+            relacao(p);
+            expressao_simples(p);
+            break;
+    }
+}
+
+/* Verifica qual operador de comparação estamos usando */
+static void relacao(Parser *p){
+    printf("<relacao> ::= = | <> | < | <= | >= | >\n");
+    const Token *t = cur(p);
+    
+    switch(t->type){
+        case EQ: match(p, EQ); break;
+        case NE: match(p, NE); break;
+        case LT: match(p, LT); break;
+        case LE: match(p, LE); break;
+        case GT: match(p, GT); break;
+        case GE: match(p, GE); break;
+        default:
+            fprintf(stderr, "%d: operador relacional esperado.\n", t->line);
+            exit(EXIT_FAILURE);
+    }
+}
+
+/* Expressão simples: somas e subtrações */
+static void expressao_simples (Parser *p){
+    printf("<expressao_simples> ::= [+|-] <termo> { (+|-) <termo> }\n");
+    
+    /* Verifica sinal unário opcional no começo (ex: -10 ou +5) */
+    const Token *check = cur(p);
+    if (check && (check->type == PLUS || check->type == MINUS)) {
+        match(p, check->type);
+    }
+
+    termo(p);
+
+    /* Processa cadeias de soma/subtração: a + b - c */
+    const Token *t = cur(p);
+    while (t && (t->type == PLUS || t->type == MINUS)){
+        match(p, t->type);
+        termo(p);
+        t = cur(p);
+    }
+}
+
+/* Termo: multiplicações e divisões (têm precedência sobre soma) */
+static void termo (Parser *p){
+    printf("<termo> ::= <fator> { (*|/) <fator> }\n");
+    fator(p);
+
+    const Token *t = cur(p);
+    while (t && (t->type == MULT || t->type == DIV)){
+        match(p, t->type);
+        fator(p);
+        t = cur(p);
+    }
+}
+
+/* Fator: a unidade básica (número, variável ou expressão entre parênteses) */
+static void fator(Parser *p){
+    printf("<fator> ::= <variavel> | <numero> | (<expressao>)\n");
+    const Token *t = cur(p);
+
+    if (!t){
+        printf("Erro: fator não esperado\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (t->type == ID){
+        variavel(p); 
+    }
+    else if (t->type == NUM){
+        match(p, NUM);
+    }
+    else if (t->type == LPAREN){
+        /* Se abrir parênteses, resolvemos a expressão interna primeiro */
+        match(p, LPAREN);
+        expressao(p);
+        match(p, RPAREN);
+    }
+    else{
+        fprintf(stderr, "%d:fator invalido [%s]\n",
+        t->line, t->lexeme ? t->lexeme : token_name(t->type));
+        exit(EXIT_FAILURE);
+    }
+}
+
+/* Variável é apenas um identificador neste nível */
+static void variavel(Parser *p) {
+    expect(p, ID);
+}
+
+/* Função principal que dispara o parser */
+void parse_program(const TokenVec *v) {
+    if (!v) return;
+    Parser p;
+    p.toks = v->data;
+    p.i = 0;
+    p.n = v->size;
+
+    if (p.n <= 0) {
+        fprintf(stderr, "0:fim de arquivo nao esperado.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    programa(&p);
 }

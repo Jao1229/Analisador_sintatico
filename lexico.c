@@ -7,35 +7,54 @@
 static const char *input;
 static int current_line = 1;
 
-/* ---------- Vetor dinâmico (mantido) ---------- */
+/* Vetor dinâmico
+   Implementação simples pra guardar os tokens sem saber a quantidade exata antes.
+*/
 static void tv_init(TokenVec *v) { v->data=NULL; v->size=v->cap=0; }
+
 static void tv_reserve(TokenVec *v, size_t n){
     if(n <= v->cap) return;
     size_t cap = v->cap ? v->cap : 16;
-    while(cap < n) cap *= 2;
+    while(cap < n) cap *= 2; /* Cresce exponencialmente pra não ficar realocando toda hora */
     Token *p = realloc(v->data, cap * sizeof(Token));
     if(!p){ perror("realloc"); exit(1); }
     v->data=p; v->cap=cap;
 }
+
 static void tv_push(TokenVec *v, Token t){
     if(v->size+1 > v->cap) tv_reserve(v, v->size+1);
     v->data[v->size++] = t;
 }
+
 void tv_free(TokenVec *v){ 
+    /* Limpa a sujeira da memória */
     for(int i=0; i<v->size; i++) {
-        free(v->data[i].lexeme); // Libera lexema se alocado
+        free(v->data[i].lexeme); 
     }
     free(v->data); v->data=NULL; v->size=v->cap=0; 
 }
 
 
-/* ---------- Lexer ---------- */
-static void skip_ws_and_newlines(void){ 
-    while(*input==' '||*input=='\t' || *input=='\n'){
-        if (*input == '\n') current_line++;
-        input++; 
+/* Lexer */
+
+static void skip_ws_and_newlines(void){
+    while(*input != '\0') {
+        /* Ignora espaços, tabs, e conta as linhas pra ajudar no debug depois */
+        if (*input == ' ' || *input == '\t' || *input == '\n' || *input == '\r') {
+            if (*input == '\n') current_line++;
+            input++;
+            continue;
+        }
+        /* Ignora caracteres de controle estranhos se aparecerem */
+        if ((unsigned char)*input <= 0x1F) {
+            if (*input == '\n') current_line++;
+            input++;
+            continue;
+        }
+        break;
     }
 }
+
 static int check_keyword(const char *s){
     if (strcmp(s, "program") == 0) return PROGRAM_TOK;
     if (strcmp(s, "var") == 0)     return VAR_TOK;
@@ -48,22 +67,33 @@ static int check_keyword(const char *s){
     if (strcmp(s, "else") == 0)    return ELSE_TOK;
     if (strcmp(s, "while") == 0)   return WHILE_TOK;
     if (strcmp(s, "do") == 0)      return DO_TOK;
-    return ID;
+    return ID; /* Se não for palavra reservada, é variável/ID */
+}
+
+/* Fiz meu próprio strndup pq nem todo compilador/SO (tipo Windows antigo) suporta nativamente.
+*/
+static char *my_strndup(const char *s, size_t n) {
+    char *p = malloc(n + 1);
+    if (!p) return NULL;
+    memcpy(p, s, n);
+    p[n] = '\0';
+    return p;
 }
 
 static Token getToken(void){
     Token tok = {0, 0.0, NULL, current_line};
     skip_ws_and_newlines();
 
-    // Fim de arquivo
+    // Acabou o arquivo
     if(*input=='\0'){ tok.type=END_FILE; tok.line=current_line; return tok; }
 
-    // Identificadores e Palavras Reservadas
+    // Identificadores e Palavras Chave
     if(isalpha((unsigned char)*input)){
         const char *start = input;
+        /* Vai engolindo caracteres alfanuméricos */
         while(isalnum((unsigned char)*input) || *input == '_') input++;
         int len = input - start;
-        char *lex = strndup(start, len);
+        char *lex = my_strndup(start, len);
         tok.type = check_keyword(lex);
         tok.lexeme = lex;
         return tok;
@@ -74,17 +104,17 @@ static Token getToken(void){
         char *endptr;
         tok.value = strtod(input, &endptr);
         int len = endptr - input;
-        tok.lexeme = strndup(input, len);
+        tok.lexeme = my_strndup(input, len);
         input = endptr;
         tok.type=NUM; 
         return tok;
     }
 
-    // Símbolos de 2 ou mais caracteres
+    // Símbolos compostos (tipo :=, <=, etc)
     if (*input == ':') {
         input++;
-        if (*input == '=') { tok.type = ASSIGN; input++; } // :=
-        else { tok.type = COLON; } // :
+        if (*input == '=') { tok.type = ASSIGN; input++; } // Achou :=
+        else { tok.type = COLON; } // Só :
     }
     else if (*input == '<') {
         input++;
@@ -98,7 +128,7 @@ static Token getToken(void){
         else { tok.type = GT; } // >
     }
     
-    // Símbolos de 1 caractere
+    // Símbolos simples
     else {
         switch(*input){
             case '+': tok.type=PLUS; break;
@@ -112,14 +142,14 @@ static Token getToken(void){
             case '=': tok.type=EQ; break;
             case '.': tok.type=DOT; break;
             default:
-                fprintf(stderr,"Erro léxico na linha %d: caractere inesperado '%c'\n", current_line, *input);
+                fprintf(stderr,"Erro léxico na linha %d: caractere estranho '%c'\n", current_line, *input);
                 exit(1);
         }
         input++;
     }
 
+    /* Aloca lexema pra símbolos simples, senão dá pau na hora de imprimir erro depois */
     if (!tok.lexeme && tok.type != 0 && tok.type != NUM && tok.type != ID) {
-        // Aloca o lexema para o caractere lido (necessário para a função perr)
         tok.lexeme = (char*)malloc(2);
         tok.lexeme[0] = (char)(tok.type);
         tok.lexeme[1] = '\0';
@@ -128,9 +158,16 @@ static Token getToken(void){
     return tok;
 }
 
-/* ---------- Tokenização completa ---------- */
+/* Gera o vetorzão com todos os tokens */
 TokenVec tokenize_to_vector(const char *src){
-    input = src;
+
+    /* Remove BOM se tiver (aqueles bytes chatos do UTF-8 no início) */
+    if (src && src[0] == (char)0xEF && src[1] == (char)0xBB && src[2] == (char)0xBF) {
+        input = src + 3;
+    } else {
+        input = src;
+    }
+
     current_line = 1;
     TokenVec v; tv_init(&v);
     for(;;){
@@ -141,7 +178,7 @@ TokenVec tokenize_to_vector(const char *src){
     return v;
 }
 
-/* ---------- Nome de token (atualizado) ---------- */
+/* Converte o enum pra string legível (pra debug) */
 const char *token_name(int t){
     switch(t){
         case NUM: return "NUMERO";

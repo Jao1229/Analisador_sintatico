@@ -1,39 +1,50 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "lexico.h"
 #include "sintatico.h"
 
-int main(void){
-   
-    const char *src_ok = 
-        "program TestePrograma;\n" 
-        "var\n"                     
-        "  a, b: integer;\n"        
-        "begin\n"                   
-        "  a := 10 + 5;\n"          
-        "  if (a < 20) then\n"      
-        "    b := a * 2\n"          
-        "  else\n"                  
-        "    b := 0;\n"             
-        "end.\n";                   
+/* Lê o arquivo do disco pra RAM de uma vez */
+char *read_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "Erro: não consegui abrir '%s'\n", path);
+        exit(1);
+    }
 
-    // Teste com erro sintático (Remoção do ';')
-    const char *src_err = 
-        "program Erro;\n"           
-        "begin\n"                   
-        "  a := 10\n"              
-        "end.\n";                   
+    /* Vai pro fim do arquivo pra pegar o tamanho */
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    rewind(f);
 
-    printf("--- Teste 1: Programa Válido ---\n");
-    TokenVec tv_ok = tokenize_to_vector(src_ok);
-    parse_program(&tv_ok);
-    tv_free(&tv_ok);
+    char *buffer = malloc(size + 1);
+    if (!buffer) {
+        fprintf(stderr, "Erro: faltou memória pra ler o arquivo\n");
+        exit(1);
+    }
 
-    printf("\n--- Teste 2: Programa com Erro (Linha 3: Falta ';') ---\n");
-    TokenVec tv_err = tokenize_to_vector(src_err);
-    parse_program(&tv_err);
-    tv_free(&tv_err);
-  
+    fread(buffer, 1, size, f);
+    buffer[size] = '\0'; /* Fecha a string */
+    fclose(f);
+    return buffer;
+}
+
+int main(int argc, char **argv) {
+
+    if (argc < 2) {
+        printf("Uso: %s <arquivo>\n", argv[0]);
+        return 1;
+    }
+
+    char *src = read_file(argv[1]);
+
+    /* Passa o scanner e depois o parser */
+    TokenVec tv = tokenize_to_vector(src);
+    parse_program(&tv);
+    
+    /* Faxina na saída */
+    tv_free(&tv);
+    free(src);
     
     return 0;
 }
